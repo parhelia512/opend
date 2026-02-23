@@ -50,6 +50,8 @@ string[] testRunnerBuildArgs(string[] userArgs) {
     return args;
 }
 
+string preferredCompiler;
+
 int main(string[] args) {
 	// maybe override the normal config files
 	// --opend-config-file
@@ -57,30 +59,53 @@ int main(string[] args) {
 	try {
 		import std.algorithm;
 		string[] buildSpecificArgs;
+		string[] otherOpendArgs;
 		string[] allOtherArgs;
-		foreach(arg; args)
+		foreach(arg; args) {
 			if(arg.startsWith("--opend-to-build="))
 				buildSpecificArgs ~= arg["--opend-to-build=".length .. $];
 			else
+			if(arg.startsWith("--opend-"))
+				otherOpendArgs ~= arg["--opend-".length .. $];
+			else
 				allOtherArgs ~= arg;
+		}
+		foreach(arg; otherOpendArgs) {
+			import std.string;
+			auto equal = arg.indexOf("=");
+			if(equal == -1)
+				throw new Exception("opend arg without param: " ~ arg);
+			auto name = arg[0 .. equal];
+			auto value = arg[equal + 1 .. $];
+
+			switch(name) {
+				case "compiler":
+					preferredCompiler = value;
+				break;
+				default:
+					throw new Exception("unknown opend arg: " ~ name);
+			}
+		}
+
 
 		if(allOtherArgs.length == 0) {
 			return 1; // should never happen...
 		} if(allOtherArgs.length == 1) {
-			return Commands.run(null);
+			return Commands.run(null, buildSpecificArgs);
 		} else switch(auto a = allOtherArgs[1]) {
 			foreach(memberName; __traits(allMembers, Commands))
+			static if(__traits(getProtection, __traits(getMember, Commands, memberName)) == "public")
 				case memberName: {
 					string[] argsToSend = allOtherArgs[2 .. $];
-					if(a == "build" /*|| a == "test"*/ || a == "publish" || a == "testOnly" || a == "check" || a == "run")
-						argsToSend = buildSpecificArgs ~ allOtherArgs[2 .. $];
-					return __traits(getMember, Commands, memberName)(argsToSend);
+					if(a == "build" || a == "test" || a == "publish" || a == "testOnly" || a == "check" || a == "run")
+						argsToSend = allOtherArgs[2 .. $];
+					return __traits(getMember, Commands, memberName)(argsToSend, buildSpecificArgs);
 				}
 			case "-h", "--help":
-				Commands.help(null);
+				Commands.help(null, null);
 				return 0;
 			default:
-				return Commands.build(buildSpecificArgs ~ allOtherArgs[1 .. $]);
+				return Commands.build(allOtherArgs[1 .. $], buildSpecificArgs);
 		}
 	} catch (Throwable e) {
 		import std.stdio;
@@ -108,12 +133,19 @@ struct Commands {
 	static:
 
 	/// Displays this information
-	int help(string[] args) {
+	int help(string[] args, string[] extraBuildArgs) {
 		import std.stdio, std.string;
 
-		writeln("`opend command_or_filename [args...]` where commands include:");
+		writeln("`opend [--opend-args...] command_or_filename [args...]` where commands include:");
+
+		writeln("Where opend-args include:");
+		writeln("\t--opend-compiler=ldmd2     prefer the ldc-based compiler in all cases");
+		writeln("\t--opend-to-build=flag      passes the given flag to the compiler when building");
+
+		writeln("Commands include:");
 
 		foreach(memberName; __traits(allMembers, Commands))
+		static if(__traits(getProtection, __traits(getMember, Commands, memberName)) == "public")
 			static if(memberName != "sendToCompilerDriver")
 				writefln("%9s\t%s", memberName, strip(__traits(docComment, __traits(getMember, Commands, memberName))));
 
@@ -122,16 +154,18 @@ struct Commands {
 	}
 
 	/// Does a debug build and immediately runs the program
-	int run(string[] args) {
+	int run(string[] args, string[] extraBuildArgs) {
 		import std.stdio, std.string;
 		if(args.length == 0) {
-			help(null);
+			help(null, null);
 			return 1;
 		}
 
+		args = extraBuildArgs ~ args;
+
 		auto oe = getOutputExecutable(args);
 
-		if(auto err = build(oe.buildArgs))
+		if(auto err = build(oe.buildArgs, null))
 			return err;
 
 		return spawnProcess([oe.exe] ~ oe.args, [
@@ -140,7 +174,7 @@ struct Commands {
 	}
 
 	/// Builds the code and runs its unittests
-	int test(string[] args) {
+	int test(string[] args, string[] extraBuildArgs) {
 		// Check if user wants advanced test runner features
 		if(args.length > 0) {
 			switch(args[0]) {
@@ -154,7 +188,7 @@ struct Commands {
 					// Delegate to test runner's help system to avoid duplication
 					auto oe = getOutputExecutable(testRunnerBuildArgs([]));
 					
-					if(auto err = build(oe.buildArgs))
+					if(auto err = build(oe.buildArgs, extraBuildArgs))
 						return err;
 					
 					return spawnProcess([oe.exe, "help"], [
@@ -170,14 +204,14 @@ struct Commands {
 		}
 		
 		// Original test behavior - run all tests
-		return run(["-g", "-unittest", "-main", "-checkaction=context"] ~ args);
+		return run(["-g", "-unittest", "-main", "-checkaction=context"] ~ extraBuildArgs ~ args, null);
 	}
 
 	private int testList(string[] args) {
 		// Build executable with test runner embedded (no -main since test_runner.d has its own)
 		auto oe = getOutputExecutable(testRunnerBuildArgs(args));
 		
-		if(auto err = build(oe.buildArgs))
+		if(auto err = build(oe.buildArgs, null))
 			return err;
 		
 		return spawnProcess([oe.exe, "list"] ~ oe.args, [
@@ -197,7 +231,7 @@ struct Commands {
 		// Build executable with test runner embedded (no -main since test_runner.d has its own)
 		auto oe = getOutputExecutable(testRunnerBuildArgs(args[1..$]));
 		
-		if(auto err = build(oe.buildArgs))
+		if(auto err = build(oe.buildArgs, null))
 			return err;
 		
 		return spawnProcess([oe.exe, "filter", args[0]] ~ oe.args, [
@@ -216,7 +250,7 @@ struct Commands {
 		// Build executable with test runner embedded (no -main since test_runner.d has its own)
 		auto oe = getOutputExecutable(testRunnerBuildArgs(args[1..$]));
 		
-		if(auto err = build(oe.buildArgs))
+		if(auto err = build(oe.buildArgs, null))
 			return err;
 		
 		return spawnProcess([oe.exe, "run", args[0]] ~ oe.args, [
@@ -225,28 +259,30 @@ struct Commands {
 	}
 
 	/// Builds the code and runs unittests but only for files explicitly listed, not auto-imported files
-	int testOnly(string[] args) {
-		return run(["-g", "-unittest=explicit", "-main", "-checkaction=context"] ~ args);
+	int testOnly(string[] args, string[] extraBuildArgs) {
+		return run(["-g", "-unittest=explicit", "-main", "-checkaction=context"] ~ extraBuildArgs ~ args, null);
 	}
 
 	/// Performs quick syntax and semantic tests, without performing code generation
-	int check(string[] args) {
-		return build(args ~ ["-o-"]);
+	int check(string[] args, string[] extraBuildArgs) {
+		return build(args ~ ["-o-"], extraBuildArgs);
 	}
 
 	/// Does a debug build with the given arguments
-	int build(string[] args) {
+	int build(string[] args, string[] extraBuildArgs) {
 		// FIXME: support -gnone?
 		// FIXME: pull info out of the cache to get the right libs and -i modifiers out
-		return sendToCompilerDriver(["-g", "-i"] ~ args, "dmd");
+		return sendToCompilerDriver(["-g", "-i"] ~ extraBuildArgs ~ args, "dmd");
 	}
 
 	/// Does a release build with the given arguments
-	int publish(string[] args) {
+	int publish(string[] args, string[] extraBuildArgs) {
 		return sendToCompilerDriver(["-i", "-O2"] ~ args, "ldmd2");
 	}
 
 	private int sendToCompilerDriver(string[] args, string preferredCompiler = null) {
+		if(.preferredCompiler !is null)
+			preferredCompiler = .preferredCompiler;
 		version(OSX) version(AArch64) if(preferredCompiler == "dmd") preferredCompiler = "ldmd2";
 
 		// extract --target
@@ -413,11 +449,11 @@ struct Commands {
 		}
 		switch(preferredCompiler) {
 			case "dmd":
-				return dmd(args);
+				return dmd(args, null);
 			case "ldmd2":
-				return ldmd2(args);
+				return ldmd2(args, null);
 			case "ldc2":
-				return ldc2(args);
+				return ldc2(args, null);
 			default:
 				goto case "ldmd2";
 		}
@@ -432,7 +468,7 @@ struct Commands {
 
 	/// Pre-compiles with the given arguments so future calls to `build` can use the cached library
 	version(none)
-	int precompile(string[] args) {
+	int precompile(string[] args, string[] extraBuildArgs) {
 		// any modules present in the precompile need to be written to the cache, knowing which output file they went into
 		// FIXME
 		return 1;
@@ -440,42 +476,42 @@ struct Commands {
 
 	/// Watches for changes to its source and attempts to automatically recompile and restart the application (if compatible)
 	version(none)
-	int watch(string[] args) {
+	int watch(string[] args, string[] extraBuildArgs) {
 		// FIXME
 		return 1;
 	}
 
 	/// Passes args to the compiler, then opens a debugger to run the generated file.
 	version(none)
-	int dbg(string[] args) {
+	int dbg(string[] args, string[] extraBuildArgs) {
 		// FIXME
 		return 1;
 	}
 
 	/// Allows for updating the OpenD compiler or libraries
 	version(none)
-	int update(string[] args) {
+	int update(string[] args, string[] extraBuildArgs) {
 		// FIXME
 		return 1;
 	}
 
 	/// Forwards arguments directly to the OpenD dmd driver
-	int dmd(string[] args) {
+	int dmd(string[] args, string[] extraBuildArgs) {
 		return spawnProcess([getCompilerPath("dmd")] ~  args, null).wait.checkForCrash("dmd");
 	}
 
 	/// Forwards arguments directly to the OpenD ldmd2 driver
-	int ldmd2(string[] args) {
+	int ldmd2(string[] args, string[] extraBuildArgs) {
 		return spawnProcess([getCompilerPath("ldmd2")] ~  args, null).wait.checkForCrash("ldmd2");
 	}
 
 	/// Forwards arguments directly to the OpenD ldc2 driver
-	int ldc2(string[] args) {
+	int ldc2(string[] args, string[] extraBuildArgs) {
 		return spawnProcess([getCompilerPath("ldc2")] ~  args, null).wait.checkForCrash("ldc2");
 	}
 
 	/// Installs optional components or updates to opend
-	int install(string[] args) {
+	int install(string[] args, string[] extraBuildArgs) {
 
 		// FIXME: remove any --opend-to-build= stuff before args[0]
 
@@ -575,7 +611,7 @@ string getCompilerPath(string compiler) {
 
 string getBundledModulePath(string moduleName) {
 	import std.file, std.path;
-    import std.string;
+	import std.string;
 	return buildPath([dirName(thisExePath()), "../import/" ~ moduleName.replace(".", "/") ~ ".d"]);
 
 }
@@ -608,6 +644,8 @@ OutputExecutable getOutputExecutable(string[] args) {
 	version(Windows)
 		extension = ".exe";
 
+	import std.path;
+
 	foreach(idx, arg; args) {
 		if(arg == "--") {
 			buildArgsSplitter = idx;
@@ -616,7 +654,7 @@ OutputExecutable getOutputExecutable(string[] args) {
 		}
 		if(arg.length > 1 && arg[0] == '-') {
 			if(arg.length > 3 && arg[0 .. 3] == "-of") {
-				name = arg[3 .. $];
+				name = baseName(arg[3 .. $]);
 				extension = null;
 				nameExplicitlyGiven = true;
 				break;
