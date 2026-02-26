@@ -2637,6 +2637,13 @@ class Throwable : Object
      */
     @property void next(Throwable tail) @trusted scope pure nothrow @nogc
     {
+        if(__ctfe) {
+            if(tail)
+                this.msg ~= ";; " ~ tail.msg;
+
+            return;
+        }
+
         void* newTail = cast(void*)tail;
         if (tail && tail._refcount)
         {
