@@ -1291,6 +1291,15 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         Type tbn = tn.toBasetype();
         if (mtype.dim)
         {
+            if (auto ide = mtype.dim.isIdentifierExp())
+            {
+                if (ide.ident == Id.dollar)
+                {
+                    mtype.next = tn;
+                    mtype.transitive();
+                    return mtype.addMod(tn.mod).merge();
+                }
+            }
             auto errors = global.errors;
             mtype.dim = semanticLength(sc, tbn, mtype.dim);
             mtype.dim = mtype.dim.implicitCastTo(sc, Type.tsize_t);
