@@ -312,7 +312,7 @@ nothrow:
                 this.text = text;
             }
 
-            public bool empty() { return index == text.length; }
+            public bool empty() { return index >= text.length; }
 
             public void popFront() { advance(); index = nextIndex; }
 
